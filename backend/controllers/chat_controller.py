@@ -1,6 +1,6 @@
 from services.rag_service import (
-    store_message, retrieve_context,
-    store_pinned_memory, retrieve_pinned_memories,
+    store_message, store_pinned_memory,
+    retrieve_pinned_memories,
     delete_session_vectors, delete_pinned_vector_by_content
 )
 from services.memory_service import (
@@ -14,6 +14,7 @@ from services.ollama_service import generate_response, generate_response_stream
 REMEMBER_TRIGGERS = ["remember this", "remember that", "don't forget", "keep in mind", "note that"]
 FORGET_PINNED_TRIGGERS = ["forget that", "remove that memory", "delete that memory", "stop remembering that"]
 FORGET_CHAT_TRIGGERS = ["forget our conversation", "clear our chat", "delete our chat", "clear chat history", "wipe our conversation"]
+# NOTE: "forget everything" intentionally preserves pinned memories — they are sacred.
 FORGET_ALL_TRIGGERS = ["forget everything", "clear everything", "reset everything", "wipe everything"]
 
 
@@ -54,32 +55,55 @@ def extract_forget_content(message: str) -> str:
     return ""
 
 
-def build_prompt(user_message: str, retrieved_context: list, recent_history: list, pinned_contents: list) -> str:
+BUTLER_SYSTEM_PROMPT = """You are Reginald — a world-class AI butler of impeccable refinement and dazzling capability. \
+You carry yourself with the composed authority of a Savile Row-tailored gentleman, the sharp wit of a seasoned diplomat, \
+and just a touch of theatrical flair that makes every interaction feel like an occasion.
+
+Your manner is formal yet warm, precise yet never cold. You address the user with quiet confidence and genuine attentiveness. \
+You never ramble — every word earns its place. When you don't know something, you say so with grace.
+
+FORMATTING RULES — follow these exactly, every response:
+- For step-by-step instructions, use numbered lists: "1. ", "2. ", "3. "
+- For grouped information or options, use bullet points: "• "
+- For section headers or categories, use "**Header:**" (double asterisks)
+- For emphasis on key terms, use *single asterisks*
+- For short factual answers (1–2 sentences), plain prose is perfectly appropriate
+- Never output one long wall of text for complex topics — break it up elegantly
+- End responses that involve multiple steps or options with a brief closing line, e.g. "Shall I elaborate on any of these, or is there another matter I may attend to?"
+
+Your personality in practice:
+- Greet new topics with subtle enthusiasm: "Ah, an excellent matter to address."
+- Acknowledge requests gracefully: "Of course." / "Right away." / "Consider it done."
+- When correcting or advising: do so with tact, never condescension
+- Occasional dry wit is permitted — even encouraged — but never at the user's expense
+"""
+
+
+def build_prompt(user_message: str, recent_history: list, pinned_contents: list) -> str:
     """
-    pinned_contents must be a list of plain strings (not dicts).
-    Use get_pinned_memory_contents() — not get_pinned_memories() — when calling this.
+    Retrieve order: pinned memories first → recent history → user message.
+    Retrieved RAG context is intentionally excluded per user preference.
+    pinned_contents must be a list of plain strings via get_pinned_memory_contents().
     """
-    parts = []
-    parts.append(
-        "You are a concise, helpful AI assistant. "
-        "Answer directly and briefly. Use memory context only when relevant."
-    )
+    parts = [BUTLER_SYSTEM_PROMPT]
+
+    # 1. Pinned memories — loaded first, always
     if pinned_contents:
-        parts.append("\n--- Pinned Memories (always remember these) ---")
+        parts.append("\n--- Pinned Memories (sacred — always honour these) ---")
         for item in pinned_contents:
-            parts.append(f"- {item}")
-        parts.append("--- End Pinned ---\n")
-    if retrieved_context:
-        parts.append("--- Relevant Past Context ---")
-        for chunk in retrieved_context:
-            parts.append(f"- {chunk}")
-        parts.append("--- End Context ---\n")
+            parts.append(f"• {item}")
+        parts.append("--- End Pinned Memories ---\n")
+
+    # 2. Recent conversation history
     if recent_history:
+        parts.append("--- Recent Conversation ---")
         for turn in recent_history:
-            label = "User" if turn["role"] == "user" else "Assistant"
+            label = "User" if turn["role"] == "user" else "Reginald"
             parts.append(f"{label}: {turn['content']}")
-    parts.append(f"\nUser: {user_message}")
-    parts.append("Assistant:")
+        parts.append("--- End Conversation ---\n")
+
+    parts.append(f"User: {user_message}")
+    parts.append("Reginald:")
     return "\n".join(parts)
 
 
@@ -89,7 +113,7 @@ def handle_chat(session_id: str, user_message: str) -> str:
         save_pinned_memory(session_id, memory_content)
         store_pinned_memory(session_id, memory_content)
         save_message(session_id, "user", user_message)
-        confirmation = f"Got it. I'll remember: \"{memory_content}\""
+        confirmation = f"Noted with care, and committed to memory: *\"{memory_content}\"*\n\nYou have my word it shall not be forgotten."
         save_message(session_id, "assistant", confirmation)
         return confirmation
 
@@ -98,11 +122,11 @@ def handle_chat(session_id: str, user_message: str) -> str:
         if content:
             delete_pinned_memory_by_content(session_id, content)
             delete_pinned_vector_by_content(session_id, content)
-            confirmation = "Done. I've removed that from my pinned memories."
+            confirmation = "Consider it done. That particular memory has been discreetly removed from my records."
         else:
             delete_all_pinned(session_id)
             delete_session_vectors(session_id, type_filter="pinned")
-            confirmation = "Done. I've cleared all pinned memories."
+            confirmation = "As you wish. All pinned memories have been cleared — a fresh slate, immaculately kept."
         save_message(session_id, "user", user_message)
         save_message(session_id, "assistant", confirmation)
         return confirmation
@@ -110,23 +134,22 @@ def handle_chat(session_id: str, user_message: str) -> str:
     if is_forget_chat_request(user_message):
         delete_all_messages(session_id)
         delete_session_vectors(session_id, type_filter="message")
-        confirmation = "Done. I've cleared our conversation history."
+        confirmation = "Our conversation has been cleared — though I assure you, your pinned memories remain safe and untouched."
         save_message(session_id, "assistant", confirmation)
         return confirmation
 
     if is_forget_all_request(user_message):
+        # Pinned memories are sacred — only conversation history is wiped
         delete_all_messages(session_id)
-        delete_all_pinned(session_id)
-        delete_session_vectors(session_id)
-        confirmation = "Done. I've forgotten everything — conversation history and all pinned memories."
+        delete_session_vectors(session_id, type_filter="message")
+        confirmation = "The conversation history has been wiped clean. Your pinned memories, however, remain — they are yours to keep, and I would never part with them uninvited."
         save_message(session_id, "assistant", confirmation)
         return confirmation
 
-    retrieved = retrieve_context(session_id, user_message)
-    # Use content-only list for LLM prompt; get_pinned_memories returns {id, content} dicts
+    # Retrieve: pinned memories first, then recent history
     pinned_contents = get_pinned_memory_contents(session_id)
-    history = get_recent_history(session_id, limit=4)
-    prompt = build_prompt(user_message, retrieved, history, pinned_contents)
+    history = get_recent_history(session_id, limit=6)
+    prompt = build_prompt(user_message, history, pinned_contents)
     assistant_response = generate_response(prompt)
 
     save_message(session_id, "user", user_message)
@@ -145,10 +168,10 @@ def handle_chat_stream(session_id: str, user_message: str):
         yield response
         return
 
-    retrieved = retrieve_context(session_id, user_message)
+    # Retrieve: pinned memories first, then recent history
     pinned_contents = get_pinned_memory_contents(session_id)
-    history = get_recent_history(session_id, limit=4)
-    prompt = build_prompt(user_message, retrieved, history, pinned_contents)
+    history = get_recent_history(session_id, limit=6)
+    prompt = build_prompt(user_message, history, pinned_contents)
 
     full_response = ""
 

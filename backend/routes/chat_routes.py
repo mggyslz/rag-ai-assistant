@@ -85,13 +85,14 @@ def history(session_id):
 def delete_conversation(session_id):
     """
     Deletes all messages for a session from both SQLite and the vector store.
-    Pinned memories are intentionally preserved (use DELETE /pinned/<id> to clear those).
+    Pinned memories are INTENTIONALLY and ALWAYS preserved — they are sacred.
+    Use DELETE /pinned/<session_id>/<memory_id> to remove individual pinned memories.
     """
     from services.memory_service import delete_all_messages
     from services.rag_service import delete_session_vectors
     delete_all_messages(session_id)
-    delete_session_vectors(session_id, type_filter="message")
-    return jsonify({"message": "Conversation deleted", "session_id": session_id})
+    delete_session_vectors(session_id, type_filter="message")  # type_filter="message" ensures pinned vectors are untouched
+    return jsonify({"message": "Conversation deleted. Pinned memories preserved.", "session_id": session_id})
 
 
 # ── Pinned memories ───────────────────────────────────────────────────────────
