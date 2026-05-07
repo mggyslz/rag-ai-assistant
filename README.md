@@ -1,50 +1,40 @@
-# Welcome to your Expo app 👋
+🚀 Core Features
+🧠 Mood Detection Engine
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Analyzes behavioral signals (tone, energy, focus, keywords) to infer user state.
+Enables adaptive responses, task suggestions, and long-term pattern tracking.
 
-## Get started
+📅 Smart Scheduler
 
-1. Install dependencies
+Context-aware task planning based on user mood and productivity patterns.
+Recommends deep or light work dynamically instead of fixed schedules.
 
-   ```bash
-   npm install
-   ```
+💡 Idea Evolution System
 
-2. Start the app
+Transforms raw ideas into refined concepts using past context and pattern matching.
+Supports idea storage, tagging, and iterative improvement.
 
-   ```bash
-   npx expo start
-   ```
+🗂️ Structured Memory Layer
 
-In the output, you'll find options to open the app in a
+Stores data in organized formats (type, tags, importance, timestamp).
+Improves retrieval accuracy and reasoning quality.
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+🔍 Reflection Engine
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+Generates insights from user behavior and activity trends.
+Enhances self-awareness and decision-making.
 
-## Get a fresh project
+⚙️ Command System
 
-When you're ready, run:
+Supports structured interactions via commands (e.g., /store, /analyze, /plan).
+Improves usability and system control.
 
-```bash
-npm run reset-project
-```
+📡 Retrieval Intelligence
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Optimized data fetching using relevance ranking and filtering.
+Reduces noise and improves response quality.
 
-## Learn more
+🎯 Personalization Layer
 
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+Learns user goals, habits, and preferences over time.
+Delivers highly tailored and context-aware responses.

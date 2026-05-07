@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import {
   View,
   Text,
@@ -6,38 +6,66 @@ import {
   TouchableOpacity,
   FlatList,
   Animated,
-  Dimensions,
-  TouchableWithoutFeedback,
+  Pressable,
+  ActivityIndicator,
   TextInput,
   Modal,
-  ActivityIndicator,
   ScrollView,
-  Alert,
 } from "react-native";
+import { colors } from "../../lib/theme/colors";
 import {
   fetchSessions,
+  deleteConversation,
+  fetchMoodState,
   fetchPinnedMemories,
   addPinnedMemory,
   updatePinnedMemory,
   deletePinnedMemoryById,
-  deleteConversation,
   SessionItem,
+  MoodSnapshot,
+  MoodTrend,
+  MoodState,
   PinnedMemory,
 } from "../../lib/services/api";
-import { colors } from "../../lib/theme/colors";
-
-const SIDEBAR_WIDTH = Dimensions.get("window").width * 0.78;
-type Tab = "chats" | "memories";
+import { MoodInsightModal } from "./MoodInsightModal";
 
 interface Props {
   visible: boolean;
   currentSessionId: string | null;
-  onSelectSession: (sessionId: string) => void;
+  onSelectSession: (id: string) => void;
   onNewChat: () => void;
   onClose: () => void;
-  /** Called after a conversation is deleted so the parent can reset state */
   onConversationDeleted: (sessionId: string) => void;
 }
+
+const MOOD_META: Record<string, { emoji: string; label: string; color: string }> = {
+  stressed:   { emoji: "😤", label: "Stressed",   color: "#ef4444" },
+  sad:        { emoji: "😔", label: "Sad",         color: "#6366f1" },
+  tired:      { emoji: "😴", label: "Tired",       color: "#8b5cf6" },
+  frustrated: { emoji: "😠", label: "Frustrated",  color: "#f97316" },
+  happy:      { emoji: "😊", label: "Happy",       color: "#22c55e" },
+  content:    { emoji: "🙂", label: "Content",     color: "#10b981" },
+  neutral:    { emoji: "😐", label: "Neutral",     color: "#6b7280" },
+};
+
+function getMoodMeta(mood: string) {
+  return MOOD_META[mood] ?? { emoji: "🤔", label: mood, color: "#6b7280" };
+}
+
+function formatTime(iso: string): string {
+  const d = new Date(iso);
+  const now = new Date();
+  const diffMs = now.getTime() - d.getTime();
+  const diffH = diffMs / 3600000;
+  if (diffH < 1) return "Just now";
+  if (diffH < 24) return `${Math.floor(diffH)}h ago`;
+  const diffD = Math.floor(diffH / 24);
+  if (diffD === 1) return "Yesterday";
+  if (diffD < 7) return `${diffD}d ago`;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+type Tab = "chats" | "memories";
 
 export const Sidebar: React.FC<Props> = ({
   visible,
@@ -47,48 +75,46 @@ export const Sidebar: React.FC<Props> = ({
   onClose,
   onConversationDeleted,
 }) => {
+  const slideAnim = useRef(new Animated.Value(-320)).current;
+  const backdropAnim = useRef(new Animated.Value(0)).current;
+
   const [activeTab, setActiveTab] = useState<Tab>("chats");
   const [sessions, setSessions] = useState<SessionItem[]>([]);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [moodState, setMoodState] = useState<MoodState>({ latest: null, trend: null, history: [] });
+  const [moodLoading, setMoodLoading] = useState(false);
+  const [insightVisible, setInsightVisible] = useState(false);
+
+  // Memories state
   const [pinnedMemories, setPinnedMemories] = useState<PinnedMemory[]>([]);
   const [loadingMemories, setLoadingMemories] = useState(false);
-
-  // New memory input
   const [newMemory, setNewMemory] = useState("");
   const [addingMemory, setAddingMemory] = useState(false);
-
-  // Edit state
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editText, setEditText] = useState("");
-
-  // Delete conversation confirm modal
-  const [deleteConfirmSession, setDeleteConfirmSession] = useState<string | null>(null);
-  // Delete memory confirm modal
   const [deleteConfirmMemoryId, setDeleteConfirmMemoryId] = useState<number | null>(null);
-
-  const slideAnim = React.useRef(new Animated.Value(-SIDEBAR_WIDTH)).current;
-  const backdropAnim = React.useRef(new Animated.Value(0)).current;
-
-  // ── Animations ──────────────────────────────────────────────────────────────
 
   useEffect(() => {
     if (visible) {
       fetchSessions().then(setSessions).catch(() => {});
+      if (currentSessionId) loadMood(currentSessionId);
       Animated.parallel([
-        Animated.timing(slideAnim, {
+        Animated.spring(slideAnim, {
           toValue: 0,
-          duration: 260,
+          tension: 68,
+          friction: 12,
           useNativeDriver: true,
         }),
         Animated.timing(backdropAnim, {
           toValue: 1,
-          duration: 260,
+          duration: 250,
           useNativeDriver: true,
         }),
       ]).start();
     } else {
       Animated.parallel([
         Animated.timing(slideAnim, {
-          toValue: -SIDEBAR_WIDTH,
+          toValue: -320,
           duration: 220,
           useNativeDriver: true,
         }),
@@ -99,7 +125,19 @@ export const Sidebar: React.FC<Props> = ({
         }),
       ]).start();
     }
-  }, [visible]);
+  }, [visible, currentSessionId]);
+
+  const loadMood = async (sessionId: string) => {
+    setMoodLoading(true);
+    try {
+      const state = await fetchMoodState(sessionId);
+      setMoodState(state);
+    } catch {
+      setMoodState({ latest: null, trend: null, history: [] });
+    } finally {
+      setMoodLoading(false);
+    }
+  };
 
   // Load pinned memories when switching to memories tab
   useEffect(() => {
@@ -120,8 +158,6 @@ export const Sidebar: React.FC<Props> = ({
       setLoadingMemories(false);
     }
   }, [currentSessionId]);
-
-  // ── Pinned memory actions ────────────────────────────────────────────────────
 
   const handleAddMemory = async () => {
     const trimmed = newMemory.trim();
@@ -172,292 +208,313 @@ export const Sidebar: React.FC<Props> = ({
     }
   };
 
-  // ── Delete conversation ──────────────────────────────────────────────────────
-
-  const handleDeleteConversation = async (sessionId: string) => {
-    try {
-      await deleteConversation(sessionId);
-      setSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
-      setDeleteConfirmSession(null);
-      onConversationDeleted(sessionId);
-      if (sessionId === currentSessionId) {
-        onClose();
+  const handleDelete = useCallback(
+    async (sessionId: string) => {
+      setDeletingId(sessionId);
+      try {
+        await deleteConversation(sessionId);
+        setSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
+        onConversationDeleted(sessionId);
+      } finally {
+        setDeletingId(null);
       }
-    } catch {
-      setDeleteConfirmSession(null);
-    }
-  };
-
-  // ── Helpers ──────────────────────────────────────────────────────────────────
-
-  const formatDate = (iso: string) => {
-    const d = new Date(iso);
-    const now = new Date();
-    const diffDays = Math.floor((now.getTime() - d.getTime()) / 86400000);
-    if (diffDays === 0) return "Today";
-    if (diffDays === 1) return "Yesterday";
-    if (diffDays < 7) return `${diffDays}d ago`;
-    return d.toLocaleDateString();
-  };
-
-  // ── Render ────────────────────────────────────────────────────────────────────
-
-  const renderChats = () => (
-    <FlatList
-      data={sessions}
-      keyExtractor={(item) => item.session_id}
-      contentContainerStyle={styles.listContent}
-      showsVerticalScrollIndicator={false}
-      ListEmptyComponent={
-        <Text style={styles.emptyText}>No previous chats yet.</Text>
-      }
-      renderItem={({ item }) => {
-        const isActive = item.session_id === currentSessionId;
-        return (
-          <View style={[styles.sessionItem, isActive && styles.sessionItemActive]}>
-            <TouchableOpacity
-              style={styles.sessionItemMain}
-              onPress={() => {
-                onSelectSession(item.session_id);
-                onClose();
-              }}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.sessionPreview} numberOfLines={2}>
-                {item.preview}
-              </Text>
-              <Text style={styles.sessionDate}>{formatDate(item.last_at)}</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.deleteSessionBtn}
-              onPress={() => setDeleteConfirmSession(item.session_id)}
-              activeOpacity={0.7}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            >
-              <Text style={styles.deleteSessionIcon}>Delete</Text>
-            </TouchableOpacity>
-          </View>
-        );
-      }}
-    />
+    },
+    [onConversationDeleted]
   );
 
-  const renderMemories = () => {
-    if (!currentSessionId) {
-      return (
-        <View style={styles.noSessionContainer}>
-          <Text style={styles.emptyText}>Start a chat to use pinned memories.</Text>
-        </View>
-      );
-    }
+  const moodMeta = moodState.latest
+    ? getMoodMeta(moodState.latest.mood)
+    : null;
+
+  const renderSession = ({ item }: { item: SessionItem }) => {
+    const isActive = item.session_id === currentSessionId;
+    const isDeleting = deletingId === item.session_id;
 
     return (
-      <View style={styles.memoriesContainer}>
-        {/* Add new memory */}
-        <View style={styles.addMemoryRow}>
-          <TextInput
-            style={styles.addMemoryInput}
-            value={newMemory}
-            onChangeText={setNewMemory}
-            placeholder="Add a memory…"
-            placeholderTextColor={colors.textMuted}
-            multiline
-            maxLength={400}
-          />
-          <TouchableOpacity
-            style={[styles.addMemoryBtn, !newMemory.trim() && styles.addMemoryBtnDisabled]}
-            onPress={handleAddMemory}
-            disabled={!newMemory.trim() || addingMemory}
-            activeOpacity={0.75}
-          >
-            {addingMemory ? (
-              <ActivityIndicator size="small" color="#fff" />
-            ) : (
-              <Text style={styles.addMemoryBtnText}>＋</Text>
-            )}
-          </TouchableOpacity>
+      <TouchableOpacity
+        style={[styles.sessionItem, isActive && styles.sessionItemActive]}
+        onPress={() => {
+          onSelectSession(item.session_id);
+          onClose();
+        }}
+        activeOpacity={0.7}
+      >
+        <View style={styles.sessionIcon}>
+          <Text style={styles.sessionIconText}>💬</Text>
         </View>
-
-        {/* Memory list */}
-        {loadingMemories ? (
-          <ActivityIndicator
-            size="small"
-            color={colors.accent}
-            style={{ marginTop: 24 }}
-          />
-        ) : pinnedMemories.length === 0 ? (
-          <Text style={[styles.emptyText, { marginTop: 20 }]}>
-            No pinned memories yet.{"\n"}Say "remember this…" in chat or add one above.
+        <View style={styles.sessionInfo}>
+          <Text style={styles.sessionPreview} numberOfLines={1}>
+            {item.preview}
           </Text>
-        ) : (
-          <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
-            {pinnedMemories.map((memory) => (
-              <View key={memory.id} style={styles.memoryItem}>
-                {editingId === memory.id ? (
-                  // ── Edit mode ────────────────────────────────────────────
-                  <View style={styles.memoryEditContainer}>
-                    <TextInput
-                      style={styles.memoryEditInput}
-                      value={editText}
-                      onChangeText={setEditText}
-                      multiline
-                      autoFocus
-                      maxLength={400}
-                    />
-                    <View style={styles.memoryEditActions}>
-                      <TouchableOpacity
-                        style={styles.editSaveBtn}
-                        onPress={() => handleSaveEdit(memory.id)}
-                        activeOpacity={0.8}
-                      >
-                        <Text style={styles.editSaveBtnText}>Save</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={styles.editCancelBtn}
-                        onPress={handleCancelEdit}
-                        activeOpacity={0.8}
-                      >
-                        <Text style={styles.editCancelBtnText}>Cancel</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                ) : (
-                  // ── View mode ─────────────────────────────────────────────
-                  <>
-                    <Text style={styles.memoryContent} numberOfLines={3}>
-                      {memory.content}
-                    </Text>
-                    <View style={styles.memoryActions}>
-                      <TouchableOpacity
-                        onPress={() => handleStartEdit(memory)}
-                        activeOpacity={0.7}
-                        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                      >
-                        <Text style={styles.memoryActionIcon}>Edit</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        onPress={() => setDeleteConfirmMemoryId(memory.id)}
-                        activeOpacity={0.7}
-                        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                      >
-                        <Text style={[styles.memoryActionIcon, styles.memoryDeleteIcon]}>Delete</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </>
-                )}
-              </View>
-            ))}
-          </ScrollView>
-        )}
-      </View>
+          <Text style={styles.sessionTime}>{formatTime(item.last_at)}</Text>
+        </View>
+        <TouchableOpacity
+          style={styles.deleteBtn}
+          onPress={() => handleDelete(item.session_id)}
+          disabled={isDeleting}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
+          {isDeleting ? (
+            <ActivityIndicator size="small" color="#555" />
+          ) : (
+            <Text style={styles.deleteBtnText}>✕</Text>
+          )}
+        </TouchableOpacity>
+      </TouchableOpacity>
     );
   };
 
   return (
     <>
       {/* Backdrop */}
-      <TouchableWithoutFeedback onPress={onClose}>
-        <Animated.View
-          pointerEvents={visible ? "auto" : "none"}
-          style={[styles.backdrop, { opacity: backdropAnim }]}
-        />
-      </TouchableWithoutFeedback>
-
-      {/* Sidebar panel */}
       <Animated.View
-        style={[styles.sidebar, { transform: [{ translateX: slideAnim }] }]}
+        pointerEvents={visible ? "auto" : "none"}
+        style={[styles.backdrop, { opacity: backdropAnim }]}
       >
-        {/* Header */}
-        <View style={styles.sidebarHeader}>
-          <View style={styles.headerTop}>
-            <Text style={styles.sidebarTitle}>Menu</Text>
-            <TouchableOpacity
-              style={styles.newChatBtn}
-              onPress={onNewChat}
-              activeOpacity={0.75}
-            >
-              <Text style={styles.newChatIcon}>✎</Text>
-              <Text style={styles.newChatText}>New Chat</Text>
-            </TouchableOpacity>
-          </View>
-
-          {/* Tabs */}
-          <View style={styles.tabRow}>
-            <TouchableOpacity
-              style={[styles.tab, activeTab === "chats" && styles.tabActive]}
-              onPress={() => setActiveTab("chats")}
-              activeOpacity={0.8}
-            >
-              <Text
-                style={[
-                  styles.tabText,
-                  activeTab === "chats" && styles.tabTextActive,
-                ]}
-              >
-                Chats
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.tab, activeTab === "memories" && styles.tabActive]}
-              onPress={() => setActiveTab("memories")}
-              activeOpacity={0.8}
-            >
-              <Text
-                style={[
-                  styles.tabText,
-                  activeTab === "memories" && styles.tabTextActive,
-                ]}
-              >
-                Memories
-              </Text>
-              {pinnedMemories.length > 0 && activeTab !== "memories" && (
-                <View style={styles.badge}>
-                  <Text style={styles.badgeText}>{pinnedMemories.length}</Text>
-                </View>
-              )}
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* Tab content */}
-        {activeTab === "chats" ? renderChats() : renderMemories()}
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
       </Animated.View>
 
-      {/* ── Delete Conversation Confirm Modal ─────────────────────────────────── */}
-      <Modal
-        visible={!!deleteConfirmSession}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setDeleteConfirmSession(null)}
+      {/* Drawer */}
+      <Animated.View
+        style={[styles.drawer, { transform: [{ translateX: slideAnim }] }]}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.confirmModal}>
-            <Text style={styles.confirmTitle}>Delete Conversation?</Text>
-            <Text style={styles.confirmBody}>
-              This will permanently remove all messages in this chat. Pinned memories will be kept.
-            </Text>
-            <View style={styles.confirmActions}>
-              <TouchableOpacity
-                style={styles.confirmCancelBtn}
-                onPress={() => setDeleteConfirmSession(null)}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.confirmCancelText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.confirmDeleteBtn}
-                onPress={() =>
-                  deleteConfirmSession &&
-                  handleDeleteConversation(deleteConfirmSession)
-                }
-                activeOpacity={0.8}
-              >
-                <Text style={styles.confirmDeleteText}>Delete</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
+        {/* Top bar */}
+        <View style={styles.topBar}>
+          <Text style={styles.drawerTitle}>Menu</Text>
+          <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
+            <Text style={styles.closeBtnText}>✕</Text>
+          </TouchableOpacity>
         </View>
-      </Modal>
+
+        {/* New chat button */}
+        <TouchableOpacity style={styles.newChatBtn} onPress={onNewChat} activeOpacity={0.8}>
+          <Text style={styles.newChatIcon}>✦</Text>
+          <Text style={styles.newChatText}>New Chat</Text>
+        </TouchableOpacity>
+
+        {/* Tabs */}
+        <View style={styles.tabRow}>
+          <TouchableOpacity
+            style={[styles.tab, activeTab === "chats" && styles.tabActive]}
+            onPress={() => setActiveTab("chats")}
+            activeOpacity={0.8}
+          >
+            <Text style={[styles.tabText, activeTab === "chats" && styles.tabTextActive]}>
+              Chats
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tab, activeTab === "memories" && styles.tabActive]}
+            onPress={() => setActiveTab("memories")}
+            activeOpacity={0.8}
+          >
+            <Text style={[styles.tabText, activeTab === "memories" && styles.tabTextActive]}>
+              Memories
+            </Text>
+            {pinnedMemories.length > 0 && activeTab !== "memories" && (
+              <View style={styles.badge}>
+                <Text style={styles.badgeText}>{pinnedMemories.length}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+        </View>
+
+        {/* ── Tab content ─────────────────────────────────────────────────── */}
+        {activeTab === "chats" ? (
+          <>
+            {/* Mood Panel — only on chats tab */}
+            <TouchableOpacity
+              style={[
+                styles.moodPanel,
+                moodMeta && { borderColor: moodMeta.color + "44" },
+              ]}
+              onPress={() => setInsightVisible(true)}
+              activeOpacity={0.8}
+            >
+              <View style={styles.moodPanelTop}>
+                <Text style={styles.moodPanelHeading}>Today's Mood</Text>
+                {moodLoading ? (
+                  <ActivityIndicator size="small" color={colors.accent} />
+                ) : (
+                  <Text style={styles.moodPanelArrow}>›</Text>
+                )}
+              </View>
+
+              {moodState.latest && moodMeta ? (
+                <View style={styles.moodPanelContent}>
+                  <View style={[styles.moodIconBg, { backgroundColor: moodMeta.color + "22" }]}>
+                    <Text style={styles.moodEmoji}>{moodMeta.emoji}</Text>
+                  </View>
+                  <View style={styles.moodPanelInfo}>
+                    <Text style={[styles.moodName, { color: moodMeta.color }]}>
+                      {moodMeta.label}
+                    </Text>
+                    <View style={styles.moodPills}>
+                      <View style={styles.moodPill}>
+                        <Text style={styles.moodPillText}>
+                          ⚡ {moodState.latest.energy}
+                        </Text>
+                      </View>
+                      <View style={styles.moodPill}>
+                        <Text style={styles.moodPillText}>
+                          🎯 {moodState.latest.focus}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                  <Text style={styles.moodConfidence}>
+                    {Math.round(moodState.latest.confidence * 100)}%
+                  </Text>
+                </View>
+              ) : (
+                <Text style={styles.moodNone}>
+                  {moodLoading ? "Reading your state…" : "No mood detected yet"}
+                </Text>
+              )}
+
+              {moodState.history.length > 0 && (
+                <View style={styles.miniSparkline}>
+                  {moodState.history.slice(-5).map((snap, i) => {
+                    const meta = getMoodMeta(snap.mood);
+                    return (
+                      <View
+                        key={i}
+                        style={[styles.miniDot, { backgroundColor: meta.color }]}
+                      />
+                    );
+                  })}
+                </View>
+              )}
+
+              <Text style={styles.moodTapHint}>Tap for insight & suggestions →</Text>
+            </TouchableOpacity>
+
+            <Text style={styles.sectionLabel}>Recent</Text>
+            <FlatList
+              data={sessions}
+              keyExtractor={(item) => item.session_id}
+              renderItem={renderSession}
+              style={styles.list}
+              contentContainerStyle={styles.listContent}
+              showsVerticalScrollIndicator={false}
+              ListEmptyComponent={
+                <Text style={styles.emptyText}>No conversations yet</Text>
+              }
+            />
+          </>
+        ) : (
+          /* ── Memories tab ────────────────────────────────────────────────── */
+          <View style={styles.memoriesContainer}>
+            {!currentSessionId ? (
+              <View style={styles.noSessionContainer}>
+                <Text style={styles.emptyText}>Start a chat to use pinned memories.</Text>
+              </View>
+            ) : (
+              <>
+                {/* Add new memory */}
+                <View style={styles.addMemoryRow}>
+                  <TextInput
+                    style={styles.addMemoryInput}
+                    value={newMemory}
+                    onChangeText={setNewMemory}
+                    placeholder="Add a memory…"
+                    placeholderTextColor="#555"
+                    multiline
+                    maxLength={400}
+                  />
+                  <TouchableOpacity
+                    style={[styles.addMemoryBtn, !newMemory.trim() && styles.addMemoryBtnDisabled]}
+                    onPress={handleAddMemory}
+                    disabled={!newMemory.trim() || addingMemory}
+                    activeOpacity={0.75}
+                  >
+                    {addingMemory ? (
+                      <ActivityIndicator size="small" color="#fff" />
+                    ) : (
+                      <Text style={styles.addMemoryBtnText}>＋</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+
+                {loadingMemories ? (
+                  <ActivityIndicator size="small" color={colors.accent} style={{ marginTop: 24 }} />
+                ) : pinnedMemories.length === 0 ? (
+                  <Text style={[styles.emptyText, { marginTop: 20 }]}>
+                    No pinned memories yet.{"\n"}Say "remember this…" in chat or add one above.
+                  </Text>
+                ) : (
+                  <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
+                    {pinnedMemories.map((memory) => (
+                      <View key={memory.id} style={styles.memoryItem}>
+                        {editingId === memory.id ? (
+                          <View style={styles.memoryEditContainer}>
+                            <TextInput
+                              style={styles.memoryEditInput}
+                              value={editText}
+                              onChangeText={setEditText}
+                              multiline
+                              autoFocus
+                              maxLength={400}
+                            />
+                            <View style={styles.memoryEditActions}>
+                              <TouchableOpacity
+                                style={styles.editSaveBtn}
+                                onPress={() => handleSaveEdit(memory.id)}
+                                activeOpacity={0.8}
+                              >
+                                <Text style={styles.editSaveBtnText}>Save</Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity
+                                style={styles.editCancelBtn}
+                                onPress={handleCancelEdit}
+                                activeOpacity={0.8}
+                              >
+                                <Text style={styles.editCancelBtnText}>Cancel</Text>
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+                        ) : (
+                          <>
+                            <Text style={styles.memoryContent} numberOfLines={3}>
+                              {memory.content}
+                            </Text>
+                            <View style={styles.memoryActions}>
+                              <TouchableOpacity
+                                onPress={() => handleStartEdit(memory)}
+                                activeOpacity={0.7}
+                                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                              >
+                                <Text style={styles.memoryActionIcon}>Edit</Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity
+                                onPress={() => setDeleteConfirmMemoryId(memory.id)}
+                                activeOpacity={0.7}
+                                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                              >
+                                <Text style={[styles.memoryActionIcon, styles.memoryDeleteIcon]}>Delete</Text>
+                              </TouchableOpacity>
+                            </View>
+                          </>
+                        )}
+                      </View>
+                    ))}
+                  </ScrollView>
+                )}
+              </>
+            )}
+          </View>
+        )}
+      </Animated.View>
+
+      {/* Mood Insight Modal */}
+      <MoodInsightModal
+        visible={insightVisible}
+        onClose={() => setInsightVisible(false)}
+        sessionId={currentSessionId}
+        latest={moodState.latest}
+        trend={moodState.trend}
+        history={moodState.history}
+      />
 
       {/* ── Delete Memory Confirm Modal ───────────────────────────────────────── */}
       <Modal
@@ -501,69 +558,235 @@ export const Sidebar: React.FC<Props> = ({
 const styles = StyleSheet.create({
   backdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.5)",
+    backgroundColor: "rgba(0,0,0,0.55)",
     zIndex: 10,
   },
-  sidebar: {
+  drawer: {
     position: "absolute",
     top: 0,
-    left: 0,
     bottom: 0,
-    width: SIDEBAR_WIDTH,
-    backgroundColor: colors.surface,
+    left: 0,
+    width: 300,
+    backgroundColor: "#0f0f14",
     zIndex: 11,
     borderRightWidth: 1,
-    borderRightColor: colors.borderSubtle,
-    display: "flex",
-    flexDirection: "column",
+    borderRightColor: "#1e1e28",
+    paddingTop: 52,
   },
 
-  // ── Header ─────────────────────────────────────────────────────────────────
-  sidebarHeader: {
-    paddingTop: 56,
-    paddingHorizontal: 16,
-    paddingBottom: 0,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.borderSubtle,
-  },
-  headerTop: {
+  topBar: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: 14,
+    paddingHorizontal: 18,
+    marginBottom: 12,
   },
-  sidebarTitle: {
-    color: colors.textPrimary,
-    fontSize: 20,
+  drawerTitle: {
+    color: "#ffffff",
+    fontSize: 18,
     fontWeight: "700",
     letterSpacing: 0.2,
   },
+  closeBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: "#1e1e28",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  closeBtnText: {
+    color: "#666",
+    fontSize: 11,
+    fontWeight: "700",
+  },
+
   newChatBtn: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    backgroundColor: colors.accentDim,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    gap: 8,
+    marginHorizontal: 14,
+    marginBottom: 16,
+    paddingVertical: 11,
+    paddingHorizontal: 16,
+    backgroundColor: colors.accent + "18",
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: colors.accent + "44",
+    borderColor: colors.accent + "33",
   },
   newChatIcon: {
     color: colors.accent,
-    fontSize: 14,
+    fontSize: 13,
   },
   newChatText: {
     color: colors.accent,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "600",
+  },
+
+  // ── Mood panel ──────────────────────────────────────────────────────────────
+  moodPanel: {
+    marginHorizontal: 14,
+    marginBottom: 16,
+    backgroundColor: "#131320",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#252530",
+    padding: 14,
+    gap: 10,
+  },
+  moodPanelTop: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  moodPanelHeading: {
+    color: "#888",
+    fontSize: 11,
+    fontWeight: "600",
+    letterSpacing: 0.6,
+    textTransform: "uppercase",
+  },
+  moodPanelArrow: {
+    color: "#555",
+    fontSize: 18,
+    lineHeight: 18,
+  },
+  moodPanelContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  moodIconBg: {
+    width: 42,
+    height: 42,
+    borderRadius: 12,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  moodEmoji: { fontSize: 22 },
+  moodPanelInfo: { flex: 1, gap: 5 },
+  moodName: {
+    fontSize: 17,
+    fontWeight: "700",
+    letterSpacing: 0.1,
+  },
+  moodPills: {
+    flexDirection: "row",
+    gap: 5,
+  },
+  moodPill: {
+    backgroundColor: "#1e1e2a",
+    borderRadius: 20,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+  },
+  moodPillText: {
+    color: "#aaa",
+    fontSize: 10,
+    fontWeight: "500",
+  },
+  moodConfidence: {
+    color: "#555",
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  moodNone: {
+    color: "#555",
+    fontSize: 13,
+    fontStyle: "italic",
+    paddingVertical: 4,
+  },
+
+  // Mini sparkline dots
+  miniSparkline: {
+    flexDirection: "row",
+    gap: 5,
+    alignItems: "center",
+  },
+  miniDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    opacity: 0.8,
+  },
+
+  moodTapHint: {
+    color: "#444",
+    fontSize: 11,
+    fontStyle: "italic",
+  },
+
+  // ── Session list ────────────────────────────────────────────────────────────
+  sectionLabel: {
+    color: "#555",
+    fontSize: 11,
+    fontWeight: "600",
+    letterSpacing: 0.6,
+    textTransform: "uppercase",
+    paddingHorizontal: 18,
+    marginBottom: 8,
+  },
+  list: { flex: 1 },
+  listContent: { paddingHorizontal: 10, paddingBottom: 24 },
+  emptyText: {
+    color: "#444",
+    fontSize: 13,
+    textAlign: "center",
+    marginTop: 20,
+    fontStyle: "italic",
+  },
+
+  sessionItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    marginBottom: 2,
+  },
+  sessionItemActive: {
+    backgroundColor: "#1a1a26",
+  },
+  sessionIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    backgroundColor: "#1a1a22",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  sessionIconText: { fontSize: 14 },
+  sessionInfo: { flex: 1, gap: 2 },
+  sessionPreview: {
+    color: "#ccc",
+    fontSize: 13,
+    fontWeight: "500",
+  },
+  sessionTime: {
+    color: "#555",
+    fontSize: 11,
+  },
+  deleteBtn: {
+    width: 24,
+    height: 24,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  deleteBtnText: {
+    color: "#444",
+    fontSize: 13,
+    fontWeight: "700",
   },
 
   // ── Tabs ───────────────────────────────────────────────────────────────────
   tabRow: {
     flexDirection: "row",
-    gap: 4,
-    paddingBottom: 0,
+    marginHorizontal: 14,
+    marginBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#1e1e28",
   },
   tab: {
     flex: 1,
@@ -579,7 +802,7 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.accent,
   },
   tabText: {
-    color: colors.textSecondary,
+    color: "#555",
     fontSize: 14,
     fontWeight: "500",
   },
@@ -602,65 +825,11 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
 
-  // ── Chat list ──────────────────────────────────────────────────────────────
-  listContent: {
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    gap: 2,
-  },
-  sessionItem: {
-    borderRadius: 10,
-    paddingLeft: 12,
-    paddingRight: 6,
-    paddingVertical: 10,
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  sessionItemActive: {
-    backgroundColor: colors.accentDim,
-  },
-  sessionItemMain: {
-    flex: 1,
-    gap: 3,
-  },
-  sessionPreview: {
-    color: colors.textPrimary,
-    fontSize: 14,
-    fontWeight: "500",
-    lineHeight: 20,
-  },
-  sessionDate: {
-    color: colors.textSecondary,
-    fontSize: 11,
-  },
-  deleteSessionBtn: {
-    padding: 6,
-    borderRadius: 6,
-    marginLeft: 4,
-    backgroundColor: "rgba(239,68,68,0.08)",
-  },
-  deleteSessionIcon: {
-    fontSize: 11,
-    fontWeight: "600",
-    color: "#ef4444",
-    opacity: 0.8,
-  },
-
-  emptyText: {
-    color: colors.textSecondary,
-    fontSize: 13,
-    textAlign: "center",
-    marginTop: 24,
-    paddingHorizontal: 16,
-    lineHeight: 20,
-  },
-
   // ── Memories tab ───────────────────────────────────────────────────────────
   memoriesContainer: {
     flex: 1,
-    paddingTop: 14,
+    paddingTop: 4,
     paddingHorizontal: 12,
-    display: "flex",
     flexDirection: "column",
   },
   noSessionContainer: {
@@ -676,13 +845,13 @@ const styles = StyleSheet.create({
   },
   addMemoryInput: {
     flex: 1,
-    backgroundColor: colors.background,
+    backgroundColor: "#131320",
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: "#252530",
     borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 9,
-    color: colors.textPrimary,
+    color: "#ccc",
     fontSize: 14,
     maxHeight: 90,
   },
@@ -695,7 +864,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   addMemoryBtnDisabled: {
-    backgroundColor: colors.sendButtonDisabled ?? colors.borderSubtle,
+    backgroundColor: "#252530",
   },
   addMemoryBtnText: {
     color: "#fff",
@@ -703,21 +872,20 @@ const styles = StyleSheet.create({
     lineHeight: 24,
     fontWeight: "600",
   },
-
   memoryItem: {
-    backgroundColor: colors.background,
+    backgroundColor: "#131320",
     borderRadius: 12,
     padding: 12,
     marginBottom: 8,
     borderWidth: 1,
-    borderColor: colors.borderSubtle,
+    borderColor: "#252530",
     flexDirection: "row",
     alignItems: "flex-start",
     gap: 8,
   },
   memoryContent: {
     flex: 1,
-    color: colors.textPrimary,
+    color: "#ccc",
     fontSize: 13,
     lineHeight: 19,
   },
@@ -730,26 +898,24 @@ const styles = StyleSheet.create({
   memoryActionIcon: {
     fontSize: 11,
     fontWeight: "600",
-    color: colors.textSecondary,
+    color: "#555",
   },
   memoryDeleteIcon: {
     color: "#ef4444",
     opacity: 0.8,
   },
-
-  // Edit mode
   memoryEditContainer: {
     flex: 1,
     gap: 8,
   },
   memoryEditInput: {
-    backgroundColor: colors.surface,
+    backgroundColor: "#0f0f14",
     borderWidth: 1,
     borderColor: colors.accent + "88",
     borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 7,
-    color: colors.textPrimary,
+    color: "#ccc",
     fontSize: 13,
     maxHeight: 100,
   },
@@ -771,13 +937,13 @@ const styles = StyleSheet.create({
   },
   editCancelBtn: {
     flex: 1,
-    backgroundColor: colors.borderSubtle,
+    backgroundColor: "#1e1e28",
     borderRadius: 8,
     paddingVertical: 7,
     alignItems: "center",
   },
   editCancelBtnText: {
-    color: colors.textSecondary,
+    color: "#888",
     fontSize: 13,
     fontWeight: "500",
   },
@@ -791,23 +957,23 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
   },
   confirmModal: {
-    backgroundColor: colors.surface,
+    backgroundColor: "#0f0f14",
     borderRadius: 18,
     padding: 24,
     width: "100%",
     maxWidth: 340,
     borderWidth: 1,
-    borderColor: colors.borderSubtle,
+    borderColor: "#1e1e28",
   },
   confirmTitle: {
-    color: colors.textPrimary,
+    color: "#fff",
     fontSize: 17,
     fontWeight: "700",
     marginBottom: 10,
     letterSpacing: 0.2,
   },
   confirmBody: {
-    color: colors.textSecondary,
+    color: "#888",
     fontSize: 14,
     lineHeight: 21,
     marginBottom: 22,
@@ -820,13 +986,13 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingVertical: 12,
     borderRadius: 12,
-    backgroundColor: colors.background,
+    backgroundColor: "#1a1a22",
     alignItems: "center",
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: "#252530",
   },
   confirmCancelText: {
-    color: colors.textPrimary,
+    color: "#ccc",
     fontSize: 15,
     fontWeight: "500",
   },

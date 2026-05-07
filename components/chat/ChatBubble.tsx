@@ -5,16 +5,47 @@ import { colors } from "../../lib/theme/colors";
 interface Props {
   role: "user" | "assistant";
   content: string;
+  mood?: string | null; // current session mood, passed from parent
+}
+
+// ── Mood tint map ─────────────────────────────────────────────────────────────
+
+const MOOD_TINT: Record<string, string> = {
+  stressed:   "#ef444410",
+  frustrated: "#f9731610",
+  sad:        "#6366f110",
+  tired:      "#8b5cf610",
+  happy:      "#22c55e10",
+  content:    "#10b98110",
+  neutral:    "transparent",
+};
+
+const MOOD_BORDER: Record<string, string> = {
+  stressed:   "#ef444428",
+  frustrated: "#f9731628",
+  sad:        "#6366f128",
+  tired:      "#8b5cf628",
+  happy:      "#22c55e28",
+  content:    "#10b98128",
+  neutral:    colors.border,
+};
+
+function getMoodTint(mood?: string | null): string {
+  if (!mood) return "transparent";
+  return MOOD_TINT[mood] ?? "transparent";
+}
+
+function getMoodBorderColor(mood?: string | null): string {
+  if (!mood) return colors.border;
+  return MOOD_BORDER[mood] ?? colors.border;
 }
 
 // ── Markdown parser ───────────────────────────────────────────────────────────
 
 type Segment = { text: string; bold?: boolean; italic?: boolean };
 
-/** Parse inline **bold** and *italic* markers into segments. */
 function parseInline(raw: string): Segment[] {
   const segments: Segment[] = [];
-  // Match **bold**, *italic* — order matters (bold first)
   const regex = /\*\*(.+?)\*\*|\*(.+?)\*/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -62,7 +93,6 @@ type Block =
   | { type: "numbered"; n: number; segments: Segment[] }
   | { type: "header"; segments: Segment[] };
 
-/** Split content into semantic blocks. */
 function parseBlocks(content: string): Block[] {
   const lines = content.split("\n");
   const blocks: Block[] = [];
@@ -71,7 +101,6 @@ function parseBlocks(content: string): Block[] {
     const line = raw.trimEnd();
     if (!line.trim()) continue;
 
-    // Numbered list: "1. " or "12. "
     const numberedMatch = line.match(/^(\d+)\.\s+(.+)/);
     if (numberedMatch) {
       blocks.push({
@@ -82,14 +111,12 @@ function parseBlocks(content: string): Block[] {
       continue;
     }
 
-    // Bullet: "• " or "- "
     const bulletMatch = line.match(/^[•\-]\s+(.+)/);
     if (bulletMatch) {
       blocks.push({ type: "bullet", segments: parseInline(bulletMatch[1]) });
       continue;
     }
 
-    // Header: "**Header:**" pattern (bold line ending with colon)
     const headerMatch = line.match(/^\*\*(.+:)\*\*$/);
     if (headerMatch) {
       blocks.push({ type: "header", segments: [{ text: headerMatch[1] }] });
@@ -135,7 +162,6 @@ function MarkdownBody({ content }: { content: string }) {
             </View>
           );
         }
-        // paragraph
         return (
           <Text key={i} style={[styles.assistantText, i > 0 && styles.paragraphSpacing]}>
             {block.segments.map((seg, j) => (
@@ -159,7 +185,7 @@ function MarkdownBody({ content }: { content: string }) {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export const ChatBubble: React.FC<Props> = ({ role, content }) => {
+export const ChatBubble: React.FC<Props> = ({ role, content, mood }) => {
   const isUser = role === "user";
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(8)).current;
@@ -180,6 +206,9 @@ export const ChatBubble: React.FC<Props> = ({ role, content }) => {
   }, []);
 
   if (!content) return null;
+
+  const moodTint = isUser ? undefined : getMoodTint(mood);
+  const moodBorder = isUser ? undefined : getMoodBorderColor(mood);
 
   return (
     <Animated.View
@@ -217,6 +246,7 @@ const styles = StyleSheet.create({
   },
   assistantWrapper: {
     alignItems: "flex-start",
+    marginVertical: 10,
   },
   userBubble: {
     backgroundColor: colors.userBubble,
@@ -256,13 +286,6 @@ const styles = StyleSheet.create({
   assistantContent: {
     flex: 1,
     paddingTop: 2,
-    backgroundColor: colors.surfaceElevated,
-    borderRadius: 16,
-    borderTopLeftRadius: 4,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderWidth: 1,
-    borderColor: colors.border,
   },
   assistantText: {
     color: "#ececec",

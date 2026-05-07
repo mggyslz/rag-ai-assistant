@@ -10,12 +10,18 @@ from services.memory_service import (
     delete_all_messages, delete_all_pinned
 )
 from services.ollama_service import generate_response, generate_response_stream
+from services.mood_analyzer import analyze_mood, get_mood_instruction
+from services.mood_service import save_mood, get_recent_moods, get_mood_trend, delete_mood_history
 
 REMEMBER_TRIGGERS = ["remember this", "remember that", "don't forget", "keep in mind", "note that"]
 FORGET_PINNED_TRIGGERS = ["forget that", "remove that memory", "delete that memory", "stop remembering that"]
 FORGET_CHAT_TRIGGERS = ["forget our conversation", "clear our chat", "delete our chat", "clear chat history", "wipe our conversation"]
-# NOTE: "forget everything" intentionally preserves pinned memories — they are sacred.
 FORGET_ALL_TRIGGERS = ["forget everything", "clear everything", "reset everything", "wipe everything"]
+MOOD_SUGGESTION_TRIGGERS = [
+    "what should i do today", "what should i do based on my mood", "based on my mood",
+    "mood suggestion", "suggest something based on my mood", "what do you recommend based on my mood",
+    "what should i do", "any suggestions based on my mood", "what would you suggest today",
+]
 
 
 def is_remember_request(message: str) -> bool:
@@ -32,6 +38,10 @@ def is_forget_chat_request(message: str) -> bool:
 
 def is_forget_all_request(message: str) -> bool:
     return any(t in message.lower() for t in FORGET_ALL_TRIGGERS)
+
+
+def is_mood_suggestion_request(message: str) -> bool:
+    return any(t in message.lower() for t in MOOD_SUGGESTION_TRIGGERS)
 
 
 def extract_memory_content(message: str) -> str:
@@ -79,22 +89,53 @@ Your personality in practice:
 """
 
 
-def build_prompt(user_message: str, recent_history: list, pinned_contents: list) -> str:
-    """
-    Retrieve order: pinned memories first → recent history → user message.
-    Retrieved RAG context is intentionally excluded per user preference.
-    pinned_contents must be a list of plain strings via get_pinned_memory_contents().
-    """
+def handle_mood_suggestion(session_id: str) -> str:
+    from services.mood_service import get_latest_mood, get_mood_trend
+    latest = get_latest_mood(session_id)
+    trend = get_mood_trend(session_id)
+
+    if not latest:
+        return (
+            "I haven't picked up on your mood just yet — send me a few messages first "
+            "and I'll have a much better read on what to suggest for your day."
+        )
+
+    mood = latest["mood"]
+    energy = latest["energy"]
+    focus = latest["focus"]
+    streak = trend.get("mood_streak", 1) if trend else 1
+
+    streak_note = f" You've been feeling this way for {streak} interactions in a row." if streak >= 3 else ""
+
+    prompt = (
+        f"{BUTLER_SYSTEM_PROMPT}\n\n"
+        f"The user's current detected mood is: {mood} (energy: {energy}, focus: {focus}).{streak_note}\n\n"
+        "Based solely on this mood profile, suggest 3 to 4 practical, specific things the user could do today "
+        "that suit their current state. Keep it concise, warm, and actionable. "
+        "Use bullet points. Do not over-explain. End with one brief encouraging closing line."
+    )
+    return generate_response(prompt)
+
+
+def build_prompt(
+    user_message: str,
+    recent_history: list,
+    pinned_contents: list,
+    mood_instruction: str = "",
+) -> str:
     parts = [BUTLER_SYSTEM_PROMPT]
 
-    # 1. Pinned memories — loaded first, always
+    if mood_instruction:
+        parts.append(f"\n--- Mood Context (adapt tone accordingly) ---")
+        parts.append(mood_instruction)
+        parts.append("--- End Mood Context ---\n")
+
     if pinned_contents:
         parts.append("\n--- Pinned Memories (sacred — always honour these) ---")
         for item in pinned_contents:
             parts.append(f"• {item}")
         parts.append("--- End Pinned Memories ---\n")
 
-    # 2. Recent conversation history
     if recent_history:
         parts.append("--- Recent Conversation ---")
         for turn in recent_history:
@@ -105,6 +146,18 @@ def build_prompt(user_message: str, recent_history: list, pinned_contents: list)
     parts.append(f"User: {user_message}")
     parts.append("Reginald:")
     return "\n".join(parts)
+
+
+def _detect_and_store_mood(session_id: str, user_message: str) -> tuple:
+    """
+    Analyze mood using rule-based NLP (no AI call), persist it,
+    and return (mood_result, mood_instruction).
+    """
+    mood_result = analyze_mood(user_message)
+    save_mood(session_id, mood_result)
+    trend = get_mood_trend(session_id)
+    mood_instruction = get_mood_instruction(mood_result, trend)
+    return mood_result, mood_instruction
 
 
 def handle_chat(session_id: str, user_message: str) -> str:
@@ -134,22 +187,32 @@ def handle_chat(session_id: str, user_message: str) -> str:
     if is_forget_chat_request(user_message):
         delete_all_messages(session_id)
         delete_session_vectors(session_id, type_filter="message")
+        delete_mood_history(session_id)
         confirmation = "Our conversation has been cleared — though I assure you, your pinned memories remain safe and untouched."
         save_message(session_id, "assistant", confirmation)
         return confirmation
 
     if is_forget_all_request(user_message):
-        # Pinned memories are sacred — only conversation history is wiped
         delete_all_messages(session_id)
         delete_session_vectors(session_id, type_filter="message")
+        delete_mood_history(session_id)
         confirmation = "The conversation history has been wiped clean. Your pinned memories, however, remain — they are yours to keep, and I would never part with them uninvited."
         save_message(session_id, "assistant", confirmation)
         return confirmation
 
-    # Retrieve: pinned memories first, then recent history
+    if is_mood_suggestion_request(user_message):
+        save_message(session_id, "user", user_message)
+        response = handle_mood_suggestion(session_id)
+        save_message(session_id, "assistant", response)
+        return response
+
+    # Rule-based mood detection — no AI call, runs instantly
+    _mood_result, mood_instruction = _detect_and_store_mood(session_id, user_message)
+
     pinned_contents = get_pinned_memory_contents(session_id)
     history = get_recent_history(session_id, limit=6)
-    prompt = build_prompt(user_message, history, pinned_contents)
+    prompt = build_prompt(user_message, history, pinned_contents, mood_instruction)
+    print(f"[DEBUG] Prompt length: {len(prompt)} chars / ~{len(prompt)//4} tokens")
     assistant_response = generate_response(prompt)
 
     save_message(session_id, "user", user_message)
@@ -163,15 +226,19 @@ def handle_chat_stream(session_id: str, user_message: str):
     if (is_remember_request(user_message) or
         is_forget_pinned_request(user_message) or
         is_forget_chat_request(user_message) or
-        is_forget_all_request(user_message)):
+        is_forget_all_request(user_message) or
+        is_mood_suggestion_request(user_message)):
         response = handle_chat(session_id, user_message)
         yield response
         return
 
-    # Retrieve: pinned memories first, then recent history
+    # Rule-based mood detection — no AI call, runs instantly
+    _mood_result, mood_instruction = _detect_and_store_mood(session_id, user_message)
+
     pinned_contents = get_pinned_memory_contents(session_id)
     history = get_recent_history(session_id, limit=6)
-    prompt = build_prompt(user_message, history, pinned_contents)
+    prompt = build_prompt(user_message, history, pinned_contents, mood_instruction)
+    print(f"[DEBUG] Stream prompt length: {len(prompt)} chars / ~{len(prompt)//4} tokens")
 
     full_response = ""
 
@@ -180,7 +247,6 @@ def handle_chat_stream(session_id: str, user_message: str):
             full_response += token
             yield token
     finally:
-        # Always persist even if stream was interrupted
         if full_response.strip():
             save_message(session_id, "user", user_message)
             save_message(session_id, "assistant", full_response.strip())

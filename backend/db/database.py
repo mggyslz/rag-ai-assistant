@@ -31,5 +31,40 @@ def init_db():
         )
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS mood_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id  TEXT NOT NULL,
+            mood        TEXT NOT NULL,
+            energy      TEXT NOT NULL,
+            focus       TEXT NOT NULL,
+            confidence  REAL NOT NULL,
+            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_mood_history_session
+        ON mood_history (session_id, created_at DESC)
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS insight_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id  TEXT NOT NULL,
+            insight     TEXT NOT NULL,
+            mood        TEXT NOT NULL,
+            energy      TEXT NOT NULL,
+            focus       TEXT NOT NULL,
+            confidence  REAL NOT NULL,
+            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_insight_history_session
+        ON insight_history (session_id, created_at DESC)
+    """)
+
     conn.commit()
     conn.close()

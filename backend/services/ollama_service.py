@@ -12,7 +12,10 @@ def generate_response(prompt: str) -> str:
 
     try:
         response = requests.post(url, json=payload, timeout=120)
-        response.raise_for_status()
+        if not response.ok:
+            error_body = response.text
+            print(f"[OLLAMA ERROR] Status {response.status_code}: {error_body}")
+            raise RuntimeError(f"Ollama error {response.status_code}: {error_body}")
         data = response.json()
         return data.get("response", "").strip()
     except requests.exceptions.ConnectionError:
@@ -30,7 +33,10 @@ def generate_response_stream(prompt: str):
 
     try:
         response = requests.post(url, json=payload, stream=True, timeout=120)
-        response.raise_for_status()
+        if not response.ok:
+            error_body = response.text
+            print(f"[OLLAMA ERROR] Status {response.status_code}: {error_body}")
+            raise RuntimeError(f"Ollama error {response.status_code}: {error_body}")
 
         for line in response.iter_lines():
             if line:

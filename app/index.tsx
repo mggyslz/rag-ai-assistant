@@ -15,24 +15,49 @@ import { ChatBubble } from "../components/chat/ChatBubble";
 import { InputBar } from "../components/ui/InputBar";
 import { TypingIndicator } from "../components/chat/TypingIndicator";
 import { Sidebar } from "../components/chat/Sidebar";
-import { sendMessageStream, fetchHistory, Message } from "../lib/services/api";
+import {
+  sendMessageStream,
+  fetchHistory,
+  fetchMoodState,
+  Message,
+  MoodSnapshot,
+} from "../lib/services/api";
 import { colors } from "../lib/theme/colors";
 
 const generateSessionId = () => "session-" + Date.now();
 const SESSION_KEY = "rag_session_id";
+
+const MOOD_META: Record<string, { emoji: string; color: string }> = {
+  angry:      { emoji: "😡", color: "#dc2626" },
+  stressed:   { emoji: "😤", color: "#ef4444" },
+  anxious:    { emoji: "😰", color: "#f59e0b" },
+  frustrated: { emoji: "😠", color: "#f97316" },
+  sad:        { emoji: "😔", color: "#6366f1" },
+  tired:      { emoji: "😴", color: "#8b5cf6" },
+  bored:      { emoji: "😑", color: "#6b7280" },
+  happy:      { emoji: "😊", color: "#22c55e" },
+  excited:    { emoji: "🤩", color: "#f472b6" },
+  content:    { emoji: "🙂", color: "#10b981" },
+  neutral:    { emoji: "😐", color: "#6b7280" },
+};
 
 export const ChatScreen: React.FC = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isTyping, setIsTyping] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sidebarVisible, setSidebarVisible] = useState(false);
+  const [currentMood, setCurrentMood] = useState<MoodSnapshot | null>(null);
   const listRef = useRef<FlatList>(null);
 
   const loadSession = useCallback(async (id: string) => {
     setMessages([]);
+    setCurrentMood(null);
     setSessionId(id);
     await AsyncStorage.setItem(SESSION_KEY, id);
     fetchHistory(id).then(setMessages).catch(() => {});
+    fetchMoodState(id)
+      .then((state) => setCurrentMood(state.latest))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -44,6 +69,9 @@ export const ChatScreen: React.FC = () => {
       }
       setSessionId(id);
       fetchHistory(id).then(setMessages).catch(() => {});
+      fetchMoodState(id)
+        .then((state) => setCurrentMood(state.latest))
+        .catch(() => {});
     };
     initSession();
   }, []);
@@ -65,21 +93,26 @@ export const ChatScreen: React.FC = () => {
     [loadSession]
   );
 
-  /**
-   * Called by Sidebar after a conversation is deleted.
-   * If the deleted session is the one currently open, start a fresh chat.
-   */
   const handleConversationDeleted = useCallback(
     async (deletedSessionId: string) => {
       if (deletedSessionId === sessionId) {
-        // Clear the screen and start a new session
         const newId = generateSessionId();
         setMessages([]);
+        setCurrentMood(null);
         setSessionId(newId);
         await AsyncStorage.setItem(SESSION_KEY, newId);
       }
     },
     [sessionId]
+  );
+
+  const refreshMood = useCallback(
+    (id: string) => {
+      fetchMoodState(id)
+        .then((state) => setCurrentMood(state.latest))
+        .catch(() => {});
+    },
+    []
   );
 
   const handleSend = useCallback(
@@ -108,6 +141,8 @@ export const ChatScreen: React.FC = () => {
         },
         () => {
           setIsTyping(false);
+          // Refresh mood after assistant finishes responding
+          refreshMood(sessionId);
         },
         (error) => {
           setIsTyping(false);
@@ -122,8 +157,10 @@ export const ChatScreen: React.FC = () => {
         }
       );
     },
-    [sessionId]
+    [sessionId, refreshMood]
   );
+
+  const moodMeta = currentMood ? (MOOD_META[currentMood.mood] ?? null) : null;
 
   const EmptyState = () => (
     <View style={styles.emptyState}>
@@ -161,6 +198,16 @@ export const ChatScreen: React.FC = () => {
           </View>
         </View>
 
+        {/* Mood badge in header */}
+        {moodMeta && currentMood && (
+          <TouchableOpacity
+            style={[styles.moodBadge, { borderColor: moodMeta.color + "44" }]}
+            onPress={() => setSidebarVisible(true)}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.moodBadgeEmoji}>{moodMeta.emoji}</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       <KeyboardAvoidingView
@@ -173,7 +220,11 @@ export const ChatScreen: React.FC = () => {
           data={messages}
           keyExtractor={(_, i) => i.toString()}
           renderItem={({ item }) => (
-            <ChatBubble role={item.role} content={item.content} />
+            <ChatBubble
+              role={item.role}
+              content={item.content}
+              mood={item.role === "assistant" ? currentMood?.mood : undefined}
+            />
           )}
           ListEmptyComponent={<EmptyState />}
           ListFooterComponent={isTyping ? <TypingIndicator /> : null}
@@ -268,6 +319,21 @@ const styles = StyleSheet.create({
     fontSize: 11,
     letterSpacing: 0.3,
   },
+
+  // Mood badge
+  moodBadge: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    backgroundColor: "#1a1a24",
+    borderWidth: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  moodBadgeEmoji: {
+    fontSize: 17,
+  },
+
   list: { flex: 1 },
   listContent: { paddingVertical: 16 },
   listContentEmpty: { flex: 1 },

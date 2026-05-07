@@ -17,6 +17,30 @@ export interface PinnedMemory {
   content: string;
 }
 
+/** A single detected mood snapshot. */
+export interface MoodSnapshot {
+  mood: string;
+  energy: string;
+  focus: string;
+  confidence: number;
+}
+
+/** Trend analysis across recent interactions. */
+export interface MoodTrend {
+  dominant_mood: string;
+  mood_streak: number;
+  avg_energy: string;
+  avg_focus: string;
+  alerts: string[];
+}
+
+/** Full mood state for a session. */
+export interface MoodState {
+  latest: MoodSnapshot | null;
+  trend: MoodTrend | null;
+  history: MoodSnapshot[];
+}
+
 // ── Chat ──────────────────────────────────────────────────────────────────────
 
 export const sendMessage = async (
@@ -97,17 +121,12 @@ export const fetchSessions = async (): Promise<SessionItem[]> => {
 
 // ── Conversation management ───────────────────────────────────────────────────
 
-/**
- * Deletes all messages for a session (SQLite + vectors).
- * Pinned memories are kept intact.
- */
 export const deleteConversation = async (sessionId: string): Promise<void> => {
   await fetch(`${BASE_URL}/conversation/${sessionId}`, { method: "DELETE" });
 };
 
 // ── Pinned memories ───────────────────────────────────────────────────────────
 
-/** Returns memories with their database ids so the UI can target them. */
 export const fetchPinnedMemories = async (
   sessionId: string
 ): Promise<PinnedMemory[]> => {
@@ -116,7 +135,6 @@ export const fetchPinnedMemories = async (
   return data.pinned;
 };
 
-/** Manually pin a new memory from the UI. */
 export const addPinnedMemory = async (
   sessionId: string,
   content: string
@@ -128,7 +146,6 @@ export const addPinnedMemory = async (
   });
 };
 
-/** Edit the text of an existing pinned memory. */
 export const updatePinnedMemory = async (
   sessionId: string,
   memoryId: number,
@@ -141,7 +158,6 @@ export const updatePinnedMemory = async (
   });
 };
 
-/** Delete a single pinned memory by its id. */
 export const deletePinnedMemoryById = async (
   sessionId: string,
   memoryId: number
@@ -149,4 +165,16 @@ export const deletePinnedMemoryById = async (
   await fetch(`${BASE_URL}/pinned/${sessionId}/${memoryId}`, {
     method: "DELETE",
   });
+};
+
+// ── Mood ──────────────────────────────────────────────────────────────────────
+
+export const fetchMoodState = async (sessionId: string): Promise<MoodState> => {
+  const response = await fetch(`${BASE_URL}/mood/${sessionId}`);
+  const data = await response.json();
+  return {
+    latest: data.latest ?? null,
+    trend: data.trend ?? null,
+    history: data.history ?? [],
+  };
 };

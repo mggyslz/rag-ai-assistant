@@ -68,12 +68,6 @@ def sessions():
 
 @chat_bp.route("/history/<session_id>", methods=["GET"])
 def history(session_id):
-    """
-    Returns the full conversation in strict chronological (ASC) order.
-    Uses get_full_history — not get_recent_history — to fix the ordering bug
-    that caused messages to appear out of sequence when history exceeded the
-    prompt-builder limit.
-    """
     from services.memory_service import get_full_history
     messages = get_full_history(session_id)
     return jsonify({"messages": messages})
@@ -83,15 +77,12 @@ def history(session_id):
 
 @chat_bp.route("/conversation/<session_id>", methods=["DELETE"])
 def delete_conversation(session_id):
-    """
-    Deletes all messages for a session from both SQLite and the vector store.
-    Pinned memories are INTENTIONALLY and ALWAYS preserved — they are sacred.
-    Use DELETE /pinned/<session_id>/<memory_id> to remove individual pinned memories.
-    """
     from services.memory_service import delete_all_messages
     from services.rag_service import delete_session_vectors
+    from services.mood_service import delete_mood_history
     delete_all_messages(session_id)
-    delete_session_vectors(session_id, type_filter="message")  # type_filter="message" ensures pinned vectors are untouched
+    delete_session_vectors(session_id, type_filter="message")
+    delete_mood_history(session_id)
     return jsonify({"message": "Conversation deleted. Pinned memories preserved.", "session_id": session_id})
 
 
@@ -99,7 +90,6 @@ def delete_conversation(session_id):
 
 @chat_bp.route("/pinned/<session_id>", methods=["GET"])
 def pinned(session_id):
-    """Returns list of {id, content} objects so the UI can target memories by id."""
     from services.memory_service import get_pinned_memories
     memories = get_pinned_memories(session_id)
     return jsonify({"pinned": memories})
@@ -107,7 +97,6 @@ def pinned(session_id):
 
 @chat_bp.route("/pinned/<session_id>", methods=["POST"])
 def add_pinned(session_id):
-    """Manually pin a memory from the UI (not via chat trigger)."""
     data = request.get_json() or {}
     content = (data.get("content") or "").strip()
     if not content:
@@ -121,7 +110,6 @@ def add_pinned(session_id):
 
 @chat_bp.route("/pinned/<session_id>/<int:memory_id>", methods=["PUT"])
 def update_pinned(session_id, memory_id):
-    """Edit the text of an existing pinned memory."""
     data = request.get_json() or {}
     new_content = (data.get("content") or "").strip()
     if not new_content:
@@ -133,13 +121,136 @@ def update_pinned(session_id, memory_id):
 
 @chat_bp.route("/pinned/<session_id>/<int:memory_id>", methods=["DELETE"])
 def delete_pinned(session_id, memory_id):
-    """Delete a single pinned memory by its numeric id."""
     from services.memory_service import delete_pinned_memory
-    from services.rag_service import delete_session_vectors
     delete_pinned_memory(session_id, memory_id)
-    # Note: vector store has no per-id delete so we leave the embedding;
-    # it won't resurface in queries once the SQL record is gone.
     return jsonify({"message": "Pinned memory removed"})
+
+
+# ── Mood ──────────────────────────────────────────────────────────────────────
+
+@chat_bp.route("/mood/<session_id>", methods=["GET"])
+def get_mood(session_id):
+    from services.mood_service import get_latest_mood, get_mood_trend, get_recent_moods
+    latest = get_latest_mood(session_id)
+    trend = get_mood_trend(session_id)
+    history = get_recent_moods(session_id, limit=10)
+    return jsonify({
+        "latest": latest,
+        "trend": trend,
+        "history": history,
+    })
+
+
+@chat_bp.route("/mood/insight", methods=["POST"])
+def mood_insight():
+    """
+    On-demand mood insight using Ollama — called only when explicitly triggered by the user.
+    Does NOT run automatically. Does NOT save anything to the DB.
+    """
+    from services.mood_analyzer import generate_mood_insight
+    from services.mood_service import get_latest_mood, get_mood_trend
+
+    data = request.get_json() or {}
+    session_id = data.get("session_id")
+
+    # Accept either a session_id (fetch stored mood) or direct mood fields
+    if session_id:
+        latest = get_latest_mood(session_id)
+        trend = get_mood_trend(session_id)
+        if not latest:
+            return jsonify({"insight": "No mood data yet — send a message first."}), 200
+        mood_result = latest
+    else:
+        mood_result = {
+            "mood": data.get("mood", "neutral"),
+            "energy": data.get("energy", "medium"),
+            "focus": data.get("focus", "medium"),
+            "confidence": data.get("confidence", 0.5),
+        }
+        trend_note = data.get("trend_note", "")
+        alert_note = data.get("alert_note", "")
+        streak = int(trend_note.split("for")[1].split("consecutive")[0].strip()) if "for" in trend_note and "consecutive" in trend_note else 1
+        trend = {
+            "mood_streak": streak,
+            "alerts": [alert_note] if alert_note else [],
+        }
+
+    try:
+        insight = generate_mood_insight(mood_result, trend)
+
+        # Persist insight + snapshot to DB
+        if session_id:
+            from db.database import get_connection
+            conn = get_connection()
+            conn.execute(
+                """INSERT INTO insight_history (session_id, insight, mood, energy, focus, confidence)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    session_id,
+                    insight,
+                    mood_result["mood"],
+                    mood_result["energy"],
+                    mood_result["focus"],
+                    mood_result["confidence"],
+                )
+            )
+            conn.commit()
+            # Prune oldest beyond 7
+            conn.execute(
+                """DELETE FROM insight_history
+                   WHERE session_id = ? AND id NOT IN (
+                       SELECT id FROM insight_history
+                       WHERE session_id = ?
+                       ORDER BY created_at DESC
+                       LIMIT 7
+                   )""",
+                (session_id, session_id)
+            )
+            conn.commit()
+            conn.close()
+
+        return jsonify({"insight": insight})
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 503
+
+
+@chat_bp.route("/mood/insight/<session_id>", methods=["GET"])
+def get_last_insight(session_id):
+    """Returns the most recently saved insight for a session."""
+    from db.database import get_connection
+    conn = get_connection()
+    cursor = conn.execute(
+        """SELECT insight, mood, energy, focus, confidence, created_at
+           FROM insight_history
+           WHERE session_id = ?
+           ORDER BY created_at DESC
+           LIMIT 1""",
+        (session_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"insight": None})
+    return jsonify({
+        "insight": row["insight"],
+        "mood": row["mood"],
+        "energy": row["energy"],
+        "focus": row["focus"],
+        "confidence": row["confidence"],
+        "created_at": row["created_at"],
+    })
+
+
+@chat_bp.route("/mood/analyze", methods=["POST"])
+def analyze_mood_endpoint():
+    """Analyze a message for mood without persisting — useful for testing."""
+    from services.mood_analyzer import analyze_mood
+    data = request.get_json() or {}
+    message = (data.get("message") or "").strip()
+    if not message:
+        return jsonify({"error": "message is required"}), 400
+    result = analyze_mood(message)
+    return jsonify(result)
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
